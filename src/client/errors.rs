@@ -57,7 +57,7 @@ pub enum TimeoutType {
     Wait,
 
     /// Timeout happened while creating a new connection.
-    Create,
+    Connect,
 
     /// Timeout happened while recycling an connection.
     Reuse,
@@ -97,7 +97,7 @@ impl<E: fmt::Display> fmt::Display for ClientError<E> {
                     f,
                     "Timeout occurred while waiting for a slot to become available"
                 ),
-                TimeoutType::Create => {
+                TimeoutType::Connect => {
                     write!(f, "Timeout occurred while creating a new connection")
                 }
                 TimeoutType::Reuse => write!(f, "Timeout occurred while recycling an connection"),

@@ -53,7 +53,7 @@ pub struct Timeouts {
     pub wait: Option<Duration>,
 
     /// Timeout when creating a new connection.
-    pub create: Option<Duration>,
+    pub connect: Option<Duration>,
 
     /// Timeout when recycling an connection.
     pub reuse: Option<Duration>,
@@ -71,7 +71,7 @@ impl Timeouts {
     #[must_use]
     pub fn wait_millis(wait: u64) -> Self {
         Self {
-            create: None,
+            connect: None,
             wait: Some(Duration::from_millis(wait)),
             reuse: None,
         }
@@ -83,7 +83,7 @@ impl Default for Timeouts {
     /// Creates an empty [`Timeouts`] config (no timeouts set).
     fn default() -> Self {
         Self {
-            create: None,
+            connect: None,
             wait: None,
             reuse: None,
         }

@@ -74,9 +74,9 @@ where
         self
     }
 
-    /// Sets the [`Timeouts::create`] value of the [`ClientConfig::timeouts`].
-    pub fn create_timeout(mut self, value: Option<Duration>) -> Self {
-        self.config.timeouts.create = value;
+    /// Sets the [`Timeouts::connect`] value of the [`ClientConfig::timeouts`].
+    pub fn connect_timeout(mut self, value: Option<Duration>) -> Self {
+        self.config.timeouts.connect = value;
         self
     }
 
@@ -91,7 +91,7 @@ where
     /// The given `hook` will be called each time right after a new [`PooledConnection`]
     /// has been created.
     pub fn post_create(mut self, hook: impl Into<Hook<M>>) -> Self {
-        self.hooks.post_create.push(hook.into());
+        self.hooks.post_connect.push(hook.into());
         self
     }
 

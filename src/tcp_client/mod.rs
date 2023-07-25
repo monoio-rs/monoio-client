@@ -8,8 +8,7 @@ use std::{
 use monoio::{buf::IoBuf, io::AsyncWriteRentExt};
 
 use crate::client::{
-    Client, ClientBuilder, ClientError, Connector, Metrics, Multiplex,
-    ReuseError, ReuseResult,
+    Client, ClientBuilder, ClientError, Connector, Metrics, Multiplex, ReuseError, ReuseResult,
 };
 use std::net::ToSocketAddrs;
 
@@ -30,6 +29,7 @@ struct TcpClientInner {
     config: TcpClientBuilder,
 }
 
+#[derive(Clone, Debug)]
 pub struct TcpClient {
     inner: Client<TcpClientInner>,
 }
@@ -40,16 +40,17 @@ impl TcpClient {
         &self,
         key: K,
         buf: T,
-    ) -> Result<(), TcpClientError> {
+    ) -> Result<T, TcpClientError> {
         let addr = key.to_socket_addrs()?.next().unwrap();
         let mut conn = self.inner.get(addr).await?;
-        let (result, _) = conn.write_all(buf).await;
-        if let Err(e) = result {
-            conn.set_io_error(&e);
-            Err(e.into())
 
-        } else {
-            Ok(())
+        let (result, buf) = conn.write_all(buf).await;
+        match result {
+            Ok(_) => Ok(buf),
+            Err(e) => {
+                conn.set_io_error(&e);
+                Err(e.into())
+            }
         }
     }
 }
@@ -60,6 +61,7 @@ pub struct TcpClientBuilder {
     no_delay: bool,
     tcp_keepalive: Option<(Option<Duration>, Option<Duration>, Option<u32>)>,
     max_conns: usize,
+    connect_timeout: Option<Duration>,
 }
 
 impl TcpClientBuilder {
@@ -70,6 +72,7 @@ impl TcpClientBuilder {
             no_delay: false,
             tcp_keepalive: None,
             max_conns: 1024,
+            connect_timeout: None,
         }
     }
 
@@ -103,10 +106,19 @@ impl TcpClientBuilder {
         self
     }
 
+    /// Timeout duration for connection creation
+    pub fn connect_timeout(mut self, value: Duration) -> Self {
+        self.connect_timeout = Some(value);
+        self
+    }
+
     pub fn build(self) -> TcpClient {
-        let max_conns = self.max_conns;
-        let inner = TcpClientInner { config: self };
-        let inner = ClientBuilder::new(inner).max_size(max_conns).build();
+        let inner = ClientBuilder::new(TcpClientInner {
+            config: self.clone(),
+        })
+        .max_size(self.max_conns)
+        .connect_timeout(self.connect_timeout)
+        .build();
 
         TcpClient { inner }
     }
@@ -117,7 +129,6 @@ impl Default for TcpClientBuilder {
         Self::new()
     }
 }
-
 
 #[derive(Debug)]
 pub struct TcpConn {

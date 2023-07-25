@@ -14,6 +14,3 @@ pub struct Status {
     /// The current size of the pool.
     pub size: usize,
 }
-
-#[cfg(test)]
-mod tests {}

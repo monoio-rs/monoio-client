@@ -31,16 +31,17 @@ pub type ReuseResult<E> = Result<(), ReuseError<E>>;
 
 /// Should be implemented for Connector::Connection if it supports multiplexing,
 /// like HTTP/2. The client will retain one connection in the Pool
-/// at all times and use the handle function to create new handles.
-/// Use the purge funtion on [`PooledConnection`] to remove
-/// multiplexed connection from pool
+/// at all times and use the fork_connection method to create handles
+/// to the underlying connection. Use the purge funtion on [`PooledConnection`]
+/// when you want to remove this resource from the pool
 pub trait Multiplex {
     /// Should return True
     fn is_multiplexed(&self) -> bool {
         false
     }
-    /// Create new connection/handle
-    fn handle(&self) -> Option<Self>
+    /// Creates a new connection to the underlying
+    /// multiplexed connection
+    fn fork_connection(&self) -> Option<Self>
     where
         Self: Sized,
     {
@@ -92,7 +93,7 @@ pub struct PooledConnection<M: Connector> {
     inner: Option<PooledConnectionInner<M>>,
 
     /// Client to return the pooled connection to.
-    pool: Weak<UnsafeCell<ClientInner<M>>>,
+    pool: Weak<ClientInner<M>>,
 }
 
 impl<M> fmt::Debug for PooledConnection<M>
@@ -109,7 +110,7 @@ where
 
 struct CandidateConnection<'a, M: Connector> {
     inner: Option<PooledConnectionInner<M>>,
-    pool: &'a mut ClientInner<M>,
+    pool: &'a ClientInner<M>,
 }
 
 impl<'a, M: Connector> CandidateConnection<'a, M> {
@@ -124,7 +125,7 @@ impl<'a, M: Connector> CandidateConnection<'a, M> {
 impl<'a, M: Connector> Drop for CandidateConnection<'a, M> {
     fn drop(&mut self) {
         if let Some(mut inner) = self.inner.take() {
-            self.pool.slots.size -= 1;
+            unsafe { (*self.pool.slots.get()).size -= 1 };
             self.pool.connector.detach(&mut inner.conn);
         }
     }
@@ -145,6 +146,7 @@ pub enum PurgeError {
     NonMultiplexedConn,
     LookupError,
     PoolUpgradeError,
+    InnerConnectionMissing,
 }
 
 impl<M: Connector> PooledConnection<M> {
@@ -154,29 +156,39 @@ impl<M: Connector> PooledConnection<M> {
     pub fn take(mut this: Self) -> M::Connection {
         let mut inner = this.inner.take().unwrap().conn;
         if let Some(pool) = PooledConnection::pool(&this) {
-            pool.get_inner_mut().detach_connection(&mut inner)
+            pool.inner.detach_connection(&mut inner)
         }
         inner
     }
 
     /// Purge the multiplexed connection from the pool.
-    /// No more handles can be created from this connection
+    /// No more forked_connections can be created from the underlying
+    /// Multiplexed connection
     pub fn purge(&mut self) -> Result<(), PurgeError> {
         if !self.is_multiplexed() {
             return Err(PurgeError::NonMultiplexedConn);
         }
 
-        let inner = self.inner.take().unwrap();
+        let inner = match self.inner.take() {
+            Some(i) => i,
+            None => {
+                return Err(PurgeError::InnerConnectionMissing);
+            }
+        };
+
         let key = inner.key;
 
         match PooledConnection::pool(self) {
-            Some(pool) => match pool.get_inner_mut().slots.get_entry(&key) {
-                Some(mut purge_conn) => {
-                    pool.get_inner_mut().detach_connection(&mut purge_conn.conn);
-                    Ok(())
+            Some(pool) => {
+                let slots = unsafe { pool.slots() };
+                match slots.get_entry(&key) {
+                    Some(mut purge_conn) => {
+                        pool.inner.detach_connection(&mut purge_conn.conn);
+                        Ok(())
+                    }
+                    None => Err(PurgeError::LookupError),
                 }
-                None => Err(PurgeError::LookupError),
-            },
+            }
             None => Err(PurgeError::PoolUpgradeError),
         }
     }
@@ -205,8 +217,7 @@ impl<M: Connector> Drop for PooledConnection<M> {
 
         if let Some(inner) = self.inner.take() {
             if let Some(pool) = self.pool.upgrade() {
-                let pool_inner = unsafe { &mut *pool.get() };
-                pool_inner.return_connection(inner)
+                pool.return_connection(inner)
             }
         }
     }
@@ -242,7 +253,7 @@ impl<M: Connector> AsMut<M::Connection> for PooledConnection<M> {
 /// This struct can be cloned and transferred across thread boundaries and uses
 /// reference counting for its internal state.
 pub struct Client<M: Connector> {
-    inner: Rc<UnsafeCell<ClientInner<M>>>,
+    inner: Rc<ClientInner<M>>,
 }
 
 // Implemented manually to avoid unnecessary trait bound on `W` Connection parameter.
@@ -267,12 +278,9 @@ impl<M: Connector> Clone for Client<M> {
 }
 
 impl<M: Connector> Client<M> {
-    fn get_inner_mut(&self) -> &mut ClientInner<M> {
-        unsafe { &mut *self.inner.get() }
-    }
-
-    fn get_inner_ref(&self) -> &ClientInner<M> {
-        unsafe { &(*self.inner.get()) }
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn slots(&self) -> &mut Slots<M> {
+        &mut *self.inner.slots.get()
     }
 
     /// Instantiates a builder for a new [`Client`].
@@ -284,17 +292,17 @@ impl<M: Connector> Client<M> {
 
     pub(crate) fn from_builder(builder: ClientBuilder<M>) -> Self {
         Self {
-            inner: Rc::new(UnsafeCell::new(ClientInner {
+            inner: Rc::new(ClientInner {
                 connector: builder.connector,
-                slots: Slots {
+                slots: UnsafeCell::new(Slots {
                     map: HashMap::with_capacity(builder.config.max_size),
                     size: 0,
                     max_size: builder.config.max_size,
-                },
+                }),
                 semaphore: Semaphore::new(builder.config.max_size),
                 config: builder.config,
                 hooks: builder.hooks,
-            })),
+            }),
         }
     }
 
@@ -325,16 +333,13 @@ impl<M: Connector> Client<M> {
         };
 
         let permit = if non_blocking {
-            self.get_inner_mut()
-                .semaphore
-                .try_acquire()
-                .map_err(|e| match e {
-                    TryAcquireError::Closed => ClientError::Closed,
-                    TryAcquireError::NoPermits => ClientError::Timeout(TimeoutType::Wait),
-                })?
+            self.inner.semaphore.try_acquire().map_err(|e| match e {
+                TryAcquireError::Closed => ClientError::Closed,
+                TryAcquireError::NoPermits => ClientError::Timeout(TimeoutType::Wait),
+            })?
         } else {
             apply_timeout(TimeoutType::Wait, timeouts.wait, async {
-                self.get_inner_mut()
+                self.inner
                     .semaphore
                     .acquire()
                     .await
@@ -345,13 +350,14 @@ impl<M: Connector> Client<M> {
 
         let inner_conn = loop {
             let key_owned = key.clone();
-            let inner_conn = self.get_inner_mut().slots.get_entry(&key_owned);
+            let slots = unsafe { self.slots() };
+            let inner_conn = slots.get_entry(&key_owned);
 
             let inner_conn = if let Some(mut inner_conn) = inner_conn {
                 self.handle_multiplex_connections(&mut inner_conn);
                 self.try_reuse(timeouts, inner_conn).await?
             } else {
-                self.try_create(key_owned, timeouts).await?
+                self.try_connect(key_owned, timeouts).await?
             };
             if let Some(inner_conn) = inner_conn {
                 break inner_conn;
@@ -368,8 +374,8 @@ impl<M: Connector> Client<M> {
 
     fn handle_multiplex_connections(&self, inner: &mut PooledConnectionInner<M>) {
         if inner.conn.is_multiplexed() {
-            if let Some(handle) = inner.conn.handle() {
-                let slots = &mut self.get_inner_mut().slots;
+            if let Some(handle) = inner.conn.fork_connection() {
+                let slots = unsafe { self.slots() };
                 slots.add_entry(PooledConnectionInner {
                     key: inner.key.clone(),
                     conn: handle,
@@ -387,12 +393,12 @@ impl<M: Connector> Client<M> {
     ) -> Result<Option<PooledConnectionInner<M>>, ClientError<M::Error>> {
         let mut candidate_conn = CandidateConnection {
             inner: Some(inner_conn),
-            pool: self.get_inner_mut(),
+            pool: &self.inner,
         };
         let inner = candidate_conn.inner();
 
         // Apply pre_reuse hooks
-        if let Err(_e) = self.get_inner_mut().hooks.pre_reuse.apply(inner).await {
+        if let Err(_e) = self.inner.hooks.pre_reuse.apply(inner).await {
             // TODO log pre_reuse error
             return Ok(None);
         }
@@ -400,9 +406,7 @@ impl<M: Connector> Client<M> {
         if apply_timeout(
             TimeoutType::Reuse,
             timeouts.reuse,
-            self.get_inner_mut()
-                .connector
-                .reuse(&mut inner.conn, &inner.metrics),
+            self.inner.connector.reuse(&mut inner.conn, &inner.metrics),
         )
         .await
         .is_err()
@@ -411,7 +415,7 @@ impl<M: Connector> Client<M> {
         }
 
         // Apply post_reuse hooks
-        if let Err(_e) = self.get_inner_mut().hooks.post_reuse.apply(inner).await {
+        if let Err(_e) = self.inner.hooks.post_reuse.apply(inner).await {
             // TODO log post_reuse error
             return Ok(None);
         }
@@ -423,7 +427,7 @@ impl<M: Connector> Client<M> {
     }
 
     #[inline]
-    async fn try_create(
+    async fn try_connect(
         &self,
         key: M::Key,
         timeouts: &Timeouts,
@@ -432,23 +436,25 @@ impl<M: Connector> Client<M> {
             inner: Some(PooledConnectionInner {
                 key: key.clone(),
                 conn: apply_timeout(
-                    TimeoutType::Create,
-                    timeouts.create,
-                    self.get_inner_mut().connector.connect(key),
+                    TimeoutType::Connect,
+                    timeouts.connect,
+                    self.inner.connector.connect(key),
                 )
                 .await?,
                 metrics: Metrics::default(),
             }),
-            pool: self.get_inner_mut(),
+            pool: &self.inner,
         };
 
-        self.get_inner_mut().slots.size += 1;
+        unsafe {
+            self.slots().size += 1;
+        };
 
-        // Apply post_create hooks
+        // Apply post_connect hooks
         if let Err(e) = self
-            .get_inner_mut()
+            .inner
             .hooks
-            .post_create
+            .post_connect
             .apply(candidate_conn.inner())
             .await
         {
@@ -460,7 +466,7 @@ impl<M: Connector> Client<M> {
 
     /// Get current timeout configuration
     pub fn timeouts(&self) -> Timeouts {
-        self.get_inner_ref().config.timeouts
+        self.inner.config.timeouts
     }
 
     /// Closes this [`Client`].
@@ -471,18 +477,18 @@ impl<M: Connector> Client<M> {
     /// This operation resizes the pool to 0.
     pub fn close(&self) {
         // self.resize(0);
-        self.get_inner_mut().semaphore.close();
+        self.inner.semaphore.close();
     }
 
     /// Indicates whether this [`Client`] has been closed.
     pub fn is_closed(&self) -> bool {
-        self.get_inner_mut().semaphore.is_closed()
+        self.inner.semaphore.is_closed()
     }
 
     /// Retrieves [`Status`] of this [`Client`].
     #[must_use]
     pub fn status(&self) -> Status {
-        let slots = &mut self.get_inner_mut().slots;
+        let slots = unsafe { self.slots() };
 
         Status {
             max_size: slots.max_size,
@@ -493,13 +499,13 @@ impl<M: Connector> Client<M> {
     /// Returns [`Connector`] of this [`Client`].
     #[must_use]
     pub fn connector(&self) -> &M {
-        &self.get_inner_ref().connector
+        &self.inner.connector
     }
 }
 
 struct ClientInner<M: Connector> {
     connector: M,
-    slots: Slots<M>,
+    slots: UnsafeCell<Slots<M>>,
     /// Number of available [`PooledConnection`]s in the [`Client`]. If there are no
     /// [`PooledConnection`]s in the [`Client`] this number can become negative and store
     /// the number of [`Future`]s waiting for an [`PooledConnection`].
@@ -518,7 +524,7 @@ struct Slots<M: Connector> {
 impl<M: Connector> Slots<M> {
     fn add_entry(&mut self, conn: PooledConnectionInner<M>) {
         let key = conn.key.clone();
-        let entry = self.map.entry(key).or_insert(VecDeque::new());
+        let entry = self.map.entry(key).or_default();
         (*entry).push_back(conn);
     }
 
@@ -548,8 +554,8 @@ where
 }
 
 impl<M: Connector> ClientInner<M> {
-    fn return_connection(&mut self, mut inner: PooledConnectionInner<M>) {
-        let slots = &mut self.slots;
+    fn return_connection(&self, mut inner: PooledConnectionInner<M>) {
+        let slots = unsafe { &mut *self.slots.get() };
         if slots.size <= slots.max_size {
             slots.add_entry(inner);
             self.semaphore.add_permits(1);
@@ -558,8 +564,8 @@ impl<M: Connector> ClientInner<M> {
             self.connector.detach(&mut inner.conn);
         }
     }
-    fn detach_connection(&mut self, conn: &mut M::Connection) {
-        let slots = &mut self.slots;
+    fn detach_connection(&self, conn: &mut M::Connection) {
+        let slots = unsafe { &mut *self.slots.get() };
         let add_permits = slots.size <= slots.max_size;
         slots.size -= 1;
         if add_permits {

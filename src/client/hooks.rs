@@ -134,7 +134,7 @@ impl<M: Connector> HookVec<M> {
 ///
 /// [`Pool`]: super::Pool
 pub(crate) struct Hooks<M: Connector> {
-    pub(crate) post_create: HookVec<M>,
+    pub(crate) post_connect: HookVec<M>,
     pub(crate) pre_reuse: HookVec<M>,
     pub(crate) post_reuse: HookVec<M>,
 }
@@ -143,7 +143,7 @@ pub(crate) struct Hooks<M: Connector> {
 impl<M: Connector> fmt::Debug for Hooks<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Hooks")
-            .field("post_create", &self.post_create)
+            .field("post_create", &self.post_connect)
             .field("pre_reuse", &self.post_reuse)
             .field("post_reuse", &self.post_reuse)
             .finish()
@@ -155,7 +155,7 @@ impl<M: Connector> Default for Hooks<M> {
     fn default() -> Self {
         Self {
             pre_reuse: HookVec::default(),
-            post_create: HookVec::default(),
+            post_connect: HookVec::default(),
             post_reuse: HookVec::default(),
         }
     }
