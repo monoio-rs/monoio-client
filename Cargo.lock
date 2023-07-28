@@ -83,12 +83,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hermit-abi"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "443144c8cdadd93ebf52ddb4056d257f5b52c04d3c804e657d19eb73fc33668b"
-
-[[package]]
 name = "io-uring"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -167,8 +161,6 @@ version = "0.1.0"
 dependencies = [
  "local-sync",
  "monoio",
- "num_cpus",
- "retain_mut",
  "serde",
  "thiserror",
 ]
@@ -196,16 +188,6 @@ dependencies = [
  "memoffset",
  "pin-utils",
  "static_assertions",
-]
-
-[[package]]
-name = "num_cpus"
-version = "1.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4161fcb6d602d4d2081af7c3a45852d875a03dd337a6bfdd6e06407b61342a43"
-dependencies = [
- "hermit-abi",
- "libc",
 ]
 
 [[package]]
@@ -237,12 +219,6 @@ checksum = "50f3b39ccfb720540debaa0164757101c08ecb8d326b15358ce76a62c7e85965"
 dependencies = [
  "proc-macro2",
 ]
-
-[[package]]
-name = "retain_mut"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4389f1d5789befaf6029ebd9f7dac4af7f7e3d61b69d4f30e2ac02b57e7712b0"
 
 [[package]]
 name = "serde"

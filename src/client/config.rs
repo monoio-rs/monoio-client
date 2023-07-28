@@ -35,10 +35,8 @@ impl ClientConfig {
 }
 
 impl Default for ClientConfig {
-    /// Creates a new [`ClientConfig`] with the `max_size` being set to
-    /// `cpu_count * 4` ignoring any logical CPUs (Hyper-Threading).
     fn default() -> Self {
-        Self::new(num_cpus::get_physical() * 4)
+        Self::new(1024)
     }
 }
 
