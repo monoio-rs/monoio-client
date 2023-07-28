@@ -116,7 +116,6 @@ impl TcpClientBuilder {
         let inner = ClientBuilder::new(TcpClientInner {
             config: self.clone(),
         })
-        .max_size(self.max_conns)
         .connect_timeout(self.connect_timeout)
         .build();
 
